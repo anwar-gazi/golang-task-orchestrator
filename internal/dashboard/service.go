@@ -6,31 +6,75 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/yourusername/task-orchestrator/internal/orchestrator"
 	"github.com/yourusername/task-orchestrator/pkg/tasks"
 )
 
 // Service handles data fetching for the dashboard
+// Service handles data fetching for the dashboard
+// Service handles data fetching for the dashboard
 type Service struct {
-	db *sql.DB
+	db          *sql.DB
+	getHandlers func() []string
+	enqueueTask func(ctx context.Context, taskType string, payload []byte) (string, error)
+	cancelTask  func(ctx context.Context, taskID string) error
+	getTaskLogs func(taskID string) (<-chan orchestrator.LogEntry, []orchestrator.LogEntry, func())
 }
 
 // NewService creates a new dashboard service
-func NewService(db *sql.DB) *Service {
-	return &Service{db: db}
+func NewService(db *sql.DB, getHandlers func() []string,
+	enqueueTask func(ctx context.Context, taskType string, payload []byte) (string, error),
+	cancelTask func(ctx context.Context, taskID string) error,
+	getTaskLogs func(taskID string) (<-chan orchestrator.LogEntry, []orchestrator.LogEntry, func())) *Service {
+	return &Service{
+		db:          db,
+		getHandlers: getHandlers,
+		enqueueTask: enqueueTask,
+		cancelTask:  cancelTask,
+		getTaskLogs: getTaskLogs,
+	}
+}
+
+// GetTaskLogs returns a log stream for a task
+func (s *Service) GetTaskLogs(taskID string) (<-chan orchestrator.LogEntry, []orchestrator.LogEntry, func(), error) {
+	if s.getTaskLogs == nil {
+		return nil, nil, nil, fmt.Errorf("log streaming not configured")
+	}
+	ch, history, cleanup := s.getTaskLogs(taskID)
+	return ch, history, cleanup, nil
+}
+
+// CancelTask cancels a task
+func (s *Service) CancelTask(ctx context.Context, taskID string) error {
+	if s.cancelTask == nil {
+		return fmt.Errorf("cancel task function not configured")
+	}
+	return s.cancelTask(ctx, taskID)
+}
+
+// EnqueueTask enqueues a new task
+func (s *Service) EnqueueTask(ctx context.Context, taskType string, payload []byte) (string, error) {
+	if s.enqueueTask == nil {
+		return "", fmt.Errorf("enqueue task function not configured")
+	}
+	return s.enqueueTask(ctx, taskType, payload)
 }
 
 // Stats holds high-level dashboard statistics
 type Stats struct {
-	PendingTasks   int
-	RunningTasks   int
-	CompletedTasks int
-	FailedTasks    int
-	ActiveWorkers  int
+	PendingTasks       int
+	RunningTasks       int
+	CompletedTasks     int
+	FailedTasks        int
+	ActiveWorkers      int
+	RegisteredHandlers []string
 }
 
 // GetStats returns dashboard statistics
 func (s *Service) GetStats(ctx context.Context) (*Stats, error) {
-	stats := &Stats{}
+	stats := &Stats{
+		RegisteredHandlers: s.getHandlers(),
+	}
 
 	// Get task counts
 	rows, err := s.db.QueryContext(ctx, `

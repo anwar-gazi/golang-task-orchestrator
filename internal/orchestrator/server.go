@@ -17,6 +17,7 @@ import (
 type HandlerFunc func(ctx context.Context, task *tasks.Task) error
 
 // Server is the main orchestrator server
+// Server is the main orchestrator server
 type Server struct {
 	handlers      map[string]HandlerFunc
 	configs       map[string]RetryConfig
@@ -31,6 +32,14 @@ type Server struct {
 	semaphore chan struct{}
 	wg        sync.WaitGroup
 	cancel    context.CancelFunc
+
+	// Active task management
+	activeTasks map[string]context.CancelFunc
+	tasksMu     sync.Mutex
+
+	// Log streaming
+	taskLogs map[string]*LogStream
+	logsMu   sync.RWMutex
 }
 
 // NewServer creates a new orchestrator server
@@ -51,6 +60,8 @@ func NewServer(db *sql.DB, config *Config, worker *Worker) *Server {
 		worker:        worker,
 		workerStore:   workerStore,
 		leaderElector: leaderElector,
+		activeTasks:   make(map[string]context.CancelFunc),
+		taskLogs:      make(map[string]*LogStream),
 	}
 }
 
@@ -65,6 +76,15 @@ func (s *Server) HandleFunc(taskType string, handler HandlerFunc, retryConfig ..
 	s.configs[taskType] = config
 
 	slog.Info("handler registered", "task_type", taskType, "max_retries", config.MaxRetries)
+}
+
+// GetHandlers returns a list of all registered task types
+func (s *Server) GetHandlers() []string {
+	var types []string
+	for k := range s.handlers {
+		types = append(types, k)
+	}
+	return types
 }
 
 // Enqueue enqueues a new task
@@ -350,8 +370,34 @@ func (s *Server) claimTasks(ctx context.Context, limit int) ([]*tasks.Task, erro
 
 // executeTask executes a single task
 func (s *Server) executeTask(ctx context.Context, task *tasks.Task) {
+	// Create cancellable context for this task
+	taskCtx, cancel := context.WithCancel(ctx)
+
+	// Register active task
+	s.tasksMu.Lock()
+	s.activeTasks[task.ID] = cancel
+	s.tasksMu.Unlock()
+
+	// Setup log streaming
+	// We use a delayed cleanup so logs are available for a bit after completion
+	stream := s.GetTaskLogStream(task.ID)
+	taskCtx = context.WithValue(taskCtx, "logStream", stream)
+
+	defer func() {
+		// Cleanup active task registry
+		s.tasksMu.Lock()
+		delete(s.activeTasks, task.ID)
+		s.tasksMu.Unlock()
+		cancel() // Ensure resources are released
+
+		// Scavenge logs after 1 hour (simple approach)
+		time.AfterFunc(1*time.Hour, func() {
+			s.cleanupTaskLogs(task.ID)
+		})
+	}()
+
 	// Update to running
-	if err := s.updateTaskStatus(ctx, task.ID, tasks.StatusRunning); err != nil {
+	if err := s.updateTaskStatus(taskCtx, task.ID, tasks.StatusRunning); err != nil {
 		slog.Error("failed to update task status", "task_id", task.ID, "error", err)
 		return
 	}
@@ -360,19 +406,19 @@ func (s *Server) executeTask(ctx context.Context, task *tasks.Task) {
 	handler, exists := s.handlers[task.Type]
 	if !exists {
 		err := fmt.Errorf("no handler registered for task type: %s", task.Type)
-		s.markTaskFailed(ctx, task, err)
+		s.markTaskFailed(taskCtx, task, err)
 		slog.Error("handler not found", "task_id", task.ID, "type", task.Type)
 		return
 	}
 
 	// Execute handler with metrics middleware
 	wrappedHandler := s.withMetrics(handler)
-	err := wrappedHandler(ctx, task)
+	err := wrappedHandler(taskCtx, task)
 
 	if err != nil {
-		s.handleTaskFailure(ctx, task, err)
+		s.handleTaskFailure(taskCtx, task, err)
 	} else {
-		s.markTaskCompleted(ctx, task)
+		s.markTaskCompleted(taskCtx, task)
 	}
 }
 
@@ -644,6 +690,19 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // Cancel cancels a task by ID
 func (s *Server) Cancel(ctx context.Context, taskID string) error {
+	// check if task is running locally
+	s.tasksMu.Lock()
+	cancel, exists := s.activeTasks[taskID]
+	s.tasksMu.Unlock()
+
+	if exists {
+		slog.Info("cancelling active task", "task_id", taskID)
+		cancel()
+		return nil
+	}
+
+	// Falls back to cancelling pending/claimed tasks or cleaning up orphaned running tasks
+	// 1. Try to delete pending/claimed tasks
 	result, err := s.db.ExecContext(ctx, `
 		DELETE FROM tasks 
 		WHERE id = $1 AND status IN ('pending', 'claimed')
@@ -655,9 +714,49 @@ func (s *Server) Cancel(ctx context.Context, taskID string) error {
 
 	rows, _ := result.RowsAffected()
 	if rows > 0 {
-		slog.Info("task cancelled", "task_id", taskID)
+		slog.Info("task cancelled (pending)", "task_id", taskID)
 		return nil
 	}
 
-	return fmt.Errorf("task is running or does not exist, cancellation propagated via context")
+	// 2. If not pending, it might be an orphaned running task (zombie from restart)
+	// Since we checked activeTasks map first, if it is 'running' in DB but not in map, it's a zombie.
+	result, err = s.db.ExecContext(ctx, `
+		UPDATE tasks 
+		SET status = 'failed', 
+			last_error = 'force cancelled (orphaned/zombie)',
+			completed_at = NOW()
+		WHERE id = $1 AND status = 'running'
+	`, taskID)
+
+	if err != nil {
+		return fmt.Errorf("failed to force cancel running task: %w", err)
+	}
+
+	rows, _ = result.RowsAffected()
+	if rows > 0 {
+		slog.Info("task force cancelled (zombie)", "task_id", taskID)
+		return nil
+	}
+
+	return fmt.Errorf("task not found or already completed")
+}
+
+// GetTaskLogStream returns the log stream for a task, creating it if necessary
+func (s *Server) GetTaskLogStream(taskID string) *LogStream {
+	s.logsMu.Lock()
+	defer s.logsMu.Unlock()
+
+	stream, exists := s.taskLogs[taskID]
+	if !exists {
+		stream = NewLogStream(1000) // Keep last 1000 lines
+		s.taskLogs[taskID] = stream
+	}
+	return stream
+}
+
+// cleanupTaskLogs removes the log stream for a task
+func (s *Server) cleanupTaskLogs(taskID string) {
+	s.logsMu.Lock()
+	defer s.logsMu.Unlock()
+	delete(s.taskLogs, taskID)
 }

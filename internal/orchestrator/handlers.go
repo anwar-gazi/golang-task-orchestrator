@@ -45,9 +45,18 @@ func NextJSHandler(ctx context.Context, task *tasks.Task) error {
 		Setpgid: true, // Create new process group
 	}
 
-	// Stream stdout/stderr to structured logger
-	cmd.Stdout = &logWriter{prefix: "nextjs", level: slog.LevelInfo}
-	cmd.Stderr = &logWriter{prefix: "nextjs", level: slog.LevelError}
+	// Stream stdout/stderr to structured logger and log stream
+	stdoutWriter := io.Writer(&logWriter{prefix: "nextjs", level: slog.LevelInfo})
+	stderrWriter := io.Writer(&logWriter{prefix: "nextjs", level: slog.LevelError})
+
+	// If a log stream is available in the context, pipe output there too
+	if stream, ok := ctx.Value("logStream").(io.Writer); ok {
+		stdoutWriter = io.MultiWriter(stdoutWriter, stream)
+		stderrWriter = io.MultiWriter(stderrWriter, stream)
+	}
+
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
 
 	// Set environment variables
 	cmd.Env = append(os.Environ(), fmt.Sprintf("PORT=%d", config.Port))
@@ -75,7 +84,29 @@ func NextJSHandler(ctx context.Context, task *tasks.Task) error {
 	return nil
 }
 
-// BackupConfig holds configuration for database backup
+// NotionCloneHandler is a wrapper around NextJSHandler with preset configuration
+func NotionCloneHandler(ctx context.Context, task *tasks.Task) error {
+	// Create preset configuration
+	config := NextJSConfig{
+		WorkingDir: "/home/resgef/works/notion-clone",
+		Port:       3000,
+	}
+
+	// Marshaling the config to JSON to replace the task payload
+	payload, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal notion clone config: %w", err)
+	}
+
+	// Create a shallow copy of the task with the new payload
+	// We don't want to modify the original task pointer as it might be used elsewhere
+	taskWithConfig := *task
+	taskWithConfig.Payload = payload
+
+	// Delegate to the generic NextJS handler
+	return NextJSHandler(ctx, &taskWithConfig)
+}
+
 type BackupConfig struct {
 	Host          string `json:"host"`
 	Port          int    `json:"port"`

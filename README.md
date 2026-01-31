@@ -208,6 +208,18 @@ payloadBytes, _ := json.Marshal(payload)
 taskID, err := server.Enqueue(ctx, "task:backup", payloadBytes)
 ```
 
+### Notion Clone Handler
+
+Starts the local Notion Clone development server with preset configuration:
+
+```go
+// Enqueue without payload (config is hardcoded)
+taskID, err := server.Enqueue(ctx, "service:notion-clone", nil)
+```
+
+- **Working Directory**: `/home/resgef/works/notion-clone`
+- **Port**: 3000
+
 ## Database Schema
 
 The orchestrator uses two main tables:

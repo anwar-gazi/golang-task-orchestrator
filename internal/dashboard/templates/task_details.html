@@ -55,5 +55,74 @@
     <h3>Payload</h3>
     <div class="code-block">{{.Payload}}</div>
   </div>
+
+  <div style="margin-top: 2rem;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+      <h3 style="margin: 0;">Logs</h3>
+      <div id="connection-status" style="font-size: 0.875rem; color: var(--text-light)">Connecting...</div>
+    </div>
+    <div id="logs-container" class="code-block"
+      style="height: 400px; overflow-y: auto; background: #1e1e1e; color: #d4d4d4; font-family: monospace; font-size: 0.875rem;">
+    </div>
+  </div>
 </div>
+
+<script>
+  (function () {
+    const logsContainer = document.getElementById('logs-container');
+    const statusEl = document.getElementById('connection-status');
+    const taskId = "{{.Task.ID}}";
+
+    // Only connect if task is running or recently finished (for history)
+    // Actually, always connect so we can see history
+    const eventSource = new EventSource(`/api/logs/${taskId}`);
+
+    eventSource.onopen = function () {
+      statusEl.textContent = "Connected";
+      statusEl.style.color = "var(--success)";
+    };
+
+    eventSource.onmessage = function (event) {
+      if (event.data === ": keepalive") return;
+
+      try {
+        const entry = JSON.parse(event.data);
+        const line = document.createElement('div');
+        line.style.borderBottom = "1px solid #333";
+        line.style.padding = "2px 0";
+
+        const timestamp = document.createElement('span');
+        timestamp.style.color = "#888";
+        timestamp.style.marginRight = "8px";
+        timestamp.style.userSelect = "none";
+        // Format time nicely
+        const date = new Date(entry.time);
+        timestamp.textContent = date.toLocaleTimeString();
+
+        const message = document.createElement('span');
+        message.textContent = entry.message;
+
+        line.appendChild(timestamp);
+        line.appendChild(message);
+
+        logsContainer.appendChild(line);
+        logsContainer.scrollTop = logsContainer.scrollHeight;
+      } catch (e) {
+        console.error("Failed to parse log entry", e);
+      }
+    };
+
+    eventSource.onerror = function (err) {
+      console.error("EventSource failed:", err);
+      statusEl.textContent = "Disconnected (Reconnecting...)";
+      statusEl.style.color = "var(--danger)";
+      // EventSource reconnects automatically
+    };
+
+    // Close connection when leaving page
+    window.addEventListener('beforeunload', () => {
+      eventSource.close();
+    });
+  })();
+</script>
 {{end}}

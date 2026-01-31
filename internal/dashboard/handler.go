@@ -1,8 +1,10 @@
 package dashboard
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // Handler serves dashboard pages
@@ -20,7 +22,131 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/", h.HandleIndex)
 	mux.HandleFunc("/tasks", h.HandleTasks)
 	mux.HandleFunc("/tasks/", h.HandleTaskDetails)
+	mux.HandleFunc("/tasks/run", h.HandleTaskRun)
+	mux.HandleFunc("/tasks/cancel", h.HandleTaskCancel)
 	mux.HandleFunc("/workers", h.HandleWorkers)
+	mux.HandleFunc("/api/logs/", h.HandleTaskLogs)
+}
+
+// HandleTaskLogs handles real-time log streaming via SSE
+func (h *Handler) HandleTaskLogs(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/logs/")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Set SSE headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Get log stream
+	ch, history, cleanup, err := h.service.GetTaskLogs(id)
+	if err != nil {
+		// Can't send JSON error easily in SSE stream start if headers set,
+		// allowing simplistic error:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer cleanup()
+
+	// Send history
+	for _, entry := range history {
+		data := fmt.Sprintf(`{"time": "%s", "message": %q}`, entry.Time.Format(time.RFC3339), entry.Message)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+	}
+	w.(http.Flusher).Flush()
+
+	// Stream new logs
+	// Create a ticker to keep connection alive
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case entry, ok := <-ch:
+			if !ok {
+				// Channel closed
+				return
+			}
+			data := fmt.Sprintf(`{"time": "%s", "message": %q}`, entry.Time.Format(time.RFC3339), entry.Message)
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+				return
+			}
+			w.(http.Flusher).Flush()
+		case <-ticker.C:
+			// Keepalive comment
+			if _, err := fmt.Fprintf(w, ": keepalive\n\n"); err != nil {
+				return
+			}
+			w.(http.Flusher).Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+// HandleTaskCancel handles task cancellation
+func (h *Handler) HandleTaskCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Failed to parse form", http.StatusBadRequest)
+		return
+	}
+
+	taskID := r.FormValue("id")
+	if taskID == "" {
+		http.Error(w, "Task ID is required", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.service.CancelTask(r.Context(), taskID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Redirect back to referrer or home
+	referer := r.Header.Get("Referer")
+	if referer == "" {
+		referer = "/"
+	}
+	http.Redirect(w, r, referer, http.StatusSeeOther)
+}
+
+// HandleTaskRun handles manual task execution
+func (h *Handler) HandleTaskRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Failed to parse form", http.StatusBadRequest)
+		return
+	}
+
+	taskType := r.FormValue("type")
+	if taskType == "" {
+		http.Error(w, "Task type is required", http.StatusBadRequest)
+		return
+	}
+
+	// For now, we support empty payloads for manual runs
+	// In the future, we could add a payload field to the form
+	_, err := h.service.EnqueueTask(r.Context(), taskType, []byte("{}"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Redirect back to home
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 // HandleIndex renders the home page

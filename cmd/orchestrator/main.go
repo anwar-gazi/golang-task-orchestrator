@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -23,6 +24,11 @@ import (
 const version = "1.0.0"
 
 func main() {
+	// Load environment variables from .env file
+	if err := godotenv.Load(); err != nil {
+		slog.Debug("No .env file found, relying on system environment variables")
+	}
+
 	// Setup structured logging
 	logLevel := slog.LevelInfo
 	if os.Getenv("DEBUG") == "true" {
@@ -110,6 +116,12 @@ func main() {
 		MaxDelay:   1 * time.Minute,
 	})
 
+	server.HandleFunc("service:notion-clone", orchestrator.NotionCloneHandler, orchestrator.RetryConfig{
+		MaxRetries: 5,
+		BaseDelay:  2 * time.Second,
+		MaxDelay:   5 * time.Minute,
+	})
+
 	// Optionally enqueue initial tasks (useful for testing)
 	if getEnvBool("ENQUEUE_EXAMPLES", false) {
 		ctx := context.Background()
@@ -144,7 +156,14 @@ func main() {
 		})
 
 		// Initialize and register dashboard
-		dashboardService := dashboard.NewService(db)
+		dashboardService := dashboard.NewService(db, server.GetHandlers, func(ctx context.Context, taskType string, payload []byte) (string, error) {
+			return server.Enqueue(ctx, taskType, payload)
+		}, func(ctx context.Context, taskID string) error {
+			return server.Cancel(ctx, taskID)
+		}, func(taskID string) (<-chan orchestrator.LogEntry, []orchestrator.LogEntry, func()) {
+			stream := server.GetTaskLogStream(taskID)
+			return stream.SubscribeWithCleanup()
+		})
 		dashboardHandler := dashboard.NewHandler(dashboardService)
 		dashboardHandler.RegisterRoutes(mux)
 
