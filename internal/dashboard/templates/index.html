@@ -1,0 +1,46 @@
+{{define "content"}}
+<div class="grid">
+  <div class="card">
+    <div class="stat-label">Pending Tasks</div>
+    <div class="stat-value">{{.Stats.PendingTasks}}</div>
+  </div>
+  <div class="card">
+    <div class="stat-label">Running Tasks</div>
+    <div class="stat-value" style="color: var(--primary)">{{.Stats.RunningTasks}}</div>
+  </div>
+  <div class="card">
+    <div class="stat-label">Active Workers</div>
+    <div class="stat-value" style="color: var(--success)">{{.Stats.ActiveWorkers}}</div>
+  </div>
+  <div class="card">
+    <div class="stat-label">Failed Tasks</div>
+    <div class="stat-value" style="color: var(--danger)">{{.Stats.FailedTasks}}</div>
+  </div>
+</div>
+
+<div class="card">
+  <h3>Recent Tasks</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Type</th>
+        <th>Status</th>
+        <th>Priority</th>
+        <th>Created</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .RecentTasks}}
+      <tr>
+        <td><a href="/tasks/{{.ID}}">{{.ID}}</a></td>
+        <td>{{.Type}}</td>
+        <td><span class="badge badge-{{.Status}}">{{.Status}}</span></td>
+        <td>{{.Priority}}</td>
+        <td>{{formatTime .CreatedAt}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}

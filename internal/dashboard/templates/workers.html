@@ -1,0 +1,43 @@
+{{define "content"}}
+<div class="card">
+  <h3>Registered Workers</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Hostname</th>
+        <th>Status</th>
+        <th>Role</th>
+        <th>Pool Size</th>
+        <th>Last Heartbeat</th>
+        <th>Started At</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Workers}}
+      <tr>
+        <td>{{.ID}}</td>
+        <td>{{.Hostname}}</td>
+        <td>
+          {{if eq .Status "active"}}
+          <span class="badge badge-completed">Active</span>
+          {{else}}
+          <span class="badge badge-dead">Dead</span>
+          {{end}}
+        </td>
+        <td>
+          {{if .IsLeader}}
+          <span class="badge badge-running">Leader</span>
+          {{else}}
+          <span class="badge">Follower</span>
+          {{end}}
+        </td>
+        <td>{{.PoolSize}}</td>
+        <td>{{formatTime .LastHeartbeat}}</td>
+        <td>{{formatTime .StartedAt}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}
